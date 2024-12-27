@@ -31,12 +31,13 @@ impl Default for Id {
 
 enum ToTimer {
     Once {
-        when: Instant,
+        deadline: Instant,
         signal: oneshot::Sender<()>,
     },
     Interval {
         id: Id,
-        interval: Duration,
+        start: Instant,
+        period: Duration,
         tick: Arc<AtomicCell<Option<oneshot::Sender<Instant>>>>,
     },
     CancelInterval(Id),
@@ -105,7 +106,7 @@ enum TimerKind {
     Once(oneshot::Sender<()>),
     Interval {
         id: Id,
-        interval: Duration,
+        period: Duration,
         tick: Arc<AtomicCell<Option<oneshot::Sender<Instant>>>>,
     },
 }
@@ -121,37 +122,35 @@ struct TimerThreadCtx {
 impl TimerThreadCtx {
     fn register_interval(
         &mut self,
-        now: Instant,
         id: Id,
-        interval: Duration,
+        start: Instant,
+        period: Duration,
         tick: Arc<AtomicCell<Option<oneshot::Sender<Instant>>>>,
     ) {
-        let k = now + interval;
         self.pending
-            .entry(k)
+            .entry(start)
             .or_insert_with(|| smallvec![])
-            .push(TimerKind::Interval { id, interval, tick });
-        self.by_id.insert(id, k);
+            .push(TimerKind::Interval { id, period, tick });
+        self.by_id.insert(id, start);
     }
 
-    fn register_once(&mut self, now: Instant, when: Instant, signal: oneshot::Sender<()>) {
-        if when <= now {
-            let _ = signal.send(());
-        } else {
-            self.pending
-                .entry(when)
-                .or_insert_with(|| smallvec![])
-                .push(TimerKind::Once(signal));
-        }
+    fn register_once(&mut self, when: Instant, signal: oneshot::Sender<()>) {
+        self.pending
+            .entry(when)
+            .or_insert_with(|| smallvec![])
+            .push(TimerKind::Once(signal));
     }
 
-    fn process_queue(&mut self, now: Instant) {
+    fn process_queue(&mut self) {
         while let Some(m) = self.queue.pop() {
             match m {
-                ToTimer::Once { when, signal } => self.register_once(now, when, signal),
-                ToTimer::Interval { id, interval, tick } => {
-                    self.register_interval(now, id, interval, tick)
-                }
+                ToTimer::Once { deadline, signal } => self.register_once(deadline, signal),
+                ToTimer::Interval {
+                    id,
+                    start,
+                    period,
+                    tick,
+                } => self.register_interval(id, start, period, tick),
                 ToTimer::CancelInterval(to_cancel) => {
                     if let Some(k) = self.by_id.remove(&to_cancel) {
                         if let Entry::Occupied(mut e) = self.pending.entry(k) {
@@ -176,8 +175,8 @@ impl TimerThreadCtx {
             by_id: FxHashMap::default(),
         };
         loop {
+            ctx.process_queue();
             let now = Instant::now();
-            ctx.process_queue(now);
             match ctx.pending.first_key_value().map(|kv| *kv.0) {
                 None => thread::park(),
                 Some(next) => {
@@ -189,11 +188,11 @@ impl TimerThreadCtx {
                                 TimerKind::Once(signal) => {
                                     let _ = signal.send(());
                                 }
-                                TimerKind::Interval { id, interval, tick } => {
+                                TimerKind::Interval { id, period, tick } => {
                                     if let Some(ch) = tick.take() {
                                         let _ = ch.send(now);
                                     }
-                                    ctx.register_interval(now, id, interval, tick);
+                                    ctx.register_interval(id, now + period, period, tick);
                                 }
                             }
                         }
@@ -204,29 +203,35 @@ impl TimerThreadCtx {
     }
 }
 
-pub fn sleep(duration: Duration) -> Sleep {
+pub fn sleep_until(deadline: Instant) -> Sleep {
     let ctx = &*CTX;
     let (signal, rx) = oneshot::channel();
-    ctx.queue.push(ToTimer::Once {
-        when: Instant::now() + duration,
-        signal,
-    });
+    ctx.queue.push(ToTimer::Once { deadline, signal });
     ctx.thread.thread().unpark();
     Sleep(rx)
 }
 
-pub fn interval(interval: Duration) -> Interval {
+pub fn sleep(duration: Duration) -> Sleep {
+    sleep_until(Instant::now() + duration)
+}
+
+pub fn interval_at(start: Instant, period: Duration) -> Interval {
     let ctx = &*CTX;
     let id = Id::default();
     let (tx, tick) = oneshot::channel();
     let register = Arc::new(AtomicCell::new(Some(tx)));
     ctx.queue.push(ToTimer::Interval {
         id,
-        interval,
+        start,
+        period,
         tick: register.clone(),
     });
     ctx.thread.thread().unpark();
     Interval { id, tick, register }
+}
+
+pub fn interval(period: Duration) -> Interval {
+    interval_at(Instant::now(), period)
 }
 
 #[derive(Debug, Clone, Copy)]
