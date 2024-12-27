@@ -1,19 +1,23 @@
 use crossbeam::{atomic::AtomicCell, queue::SegQueue};
 use fxhash::FxHashMap;
+use pin_project::pin_project;
 use smallvec::{smallvec, SmallVec};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
-    future::{poll_fn, Future},
-    pin::Pin,
+    error::Error,
+    fmt,
+    future::{poll_fn, Future, IntoFuture},
+    pin::{pin, Pin},
+    result::Result,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, LazyLock,
     },
     task::{Context, Poll},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
-use tokio::sync::oneshot;
+use tokio::{sync::oneshot, time::Instant};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Id(usize);
@@ -223,4 +227,45 @@ pub fn interval(interval: Duration) -> Interval {
     });
     ctx.thread.thread().unpark();
     Interval { id, tick, register }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Elapsed;
+
+impl fmt::Display for Elapsed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Timeout expired")
+    }
+}
+
+impl Error for Elapsed {}
+
+#[pin_project]
+pub struct Timeout<F> {
+    #[pin]
+    timeout: Sleep,
+    #[pin]
+    future: F,
+}
+
+impl<F: Future> Future for Timeout<F> {
+    type Output = Result<<F as Future>::Output, Elapsed>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let proj = self.project();
+        match proj.future.poll(cx) {
+            Poll::Ready(r) => Poll::Ready(Ok(r)),
+            Poll::Pending => match proj.timeout.poll(cx) {
+                Poll::Ready(_) => Poll::Ready(Err(Elapsed)),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+}
+
+pub fn timeout<F: IntoFuture>(duration: Duration, future: F) -> Timeout<F::IntoFuture> {
+    Timeout {
+        timeout: sleep(duration),
+        future: future.into_future(),
+    }
 }
