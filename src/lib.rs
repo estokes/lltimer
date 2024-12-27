@@ -32,7 +32,7 @@ impl Default for Id {
 enum ToTimer {
     Once {
         when: Instant,
-        signal: oneshot::Sender<Instant>,
+        signal: oneshot::Sender<()>,
     },
     Interval {
         id: Id,
@@ -42,15 +42,15 @@ enum ToTimer {
     CancelInterval(Id),
 }
 
-pub struct Sleep(oneshot::Receiver<Instant>);
+pub struct Sleep(oneshot::Receiver<()>);
 
 impl Future for Sleep {
-    type Output = Instant;
+    type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.0)
             .poll(cx)
-            .map(|r| r.unwrap_or_else(|_| Instant::now()))
+            .map(|r| r.unwrap_or_else(|_| ()))
     }
 }
 
@@ -102,7 +102,7 @@ fn init() -> TimerCtx {
 }
 
 enum TimerKind {
-    Once(oneshot::Sender<Instant>),
+    Once(oneshot::Sender<()>),
     Interval {
         id: Id,
         interval: Duration,
@@ -134,9 +134,9 @@ impl TimerThreadCtx {
         self.by_id.insert(id, k);
     }
 
-    fn register_once(&mut self, now: Instant, when: Instant, signal: oneshot::Sender<Instant>) {
+    fn register_once(&mut self, now: Instant, when: Instant, signal: oneshot::Sender<()>) {
         if when <= now {
-            let _ = signal.send(now);
+            let _ = signal.send(());
         } else {
             self.pending
                 .entry(when)
@@ -187,7 +187,7 @@ impl TimerThreadCtx {
                         for t in ctx.pending.pop_first().unwrap().1 {
                             match t {
                                 TimerKind::Once(signal) => {
-                                    let _ = signal.send(now);
+                                    let _ = signal.send(());
                                 }
                                 TimerKind::Interval { id, interval, tick } => {
                                     if let Some(ch) = tick.take() {
