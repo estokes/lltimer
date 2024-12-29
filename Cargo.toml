@@ -9,5 +9,5 @@ fxhash = "0.2.1"
 smallvec = { version = "1.13.2", features = ["union", "const_generics"] }
 tokio = { version = "1.42.0", features = ["sync", "time"] }
 pin-project = "1"
-portable-atomic = { version = "1", default-features = false }
+portable-atomic = "1"
 triomphe = "0.1"
