@@ -2,7 +2,7 @@ use crossbeam::atomic::AtomicCell;
 use std::{
     future::Future,
     pin::Pin,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll, Waker},
 };
 use triomphe::Arc;
@@ -77,7 +77,7 @@ impl Future for Receiver {
                         self.0.waker.store(Some(cx.waker().clone()));
                     }
                 }
-                break Poll::Pending
+                break Poll::Pending;
             }
         }
     }
