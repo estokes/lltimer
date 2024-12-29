@@ -1,4 +1,3 @@
-use crate::atomic_waker::AtomicWaker;
 use crossbeam::atomic::AtomicCell;
 use std::{
     future::Future,
@@ -20,23 +19,18 @@ impl Default for Id {
 
 struct Inner {
     id: Id,
-    filled: AtomicBool,
+    queue: AtomicUsize,
     waker: AtomicCell<Option<Waker>>,
 }
 
 pub(crate) struct Sender(Arc<Inner>);
 
 impl Sender {
-    pub(crate) fn send(&self) -> bool {
-        let missed = self
-            .0
-            .filled
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err();
+    pub(crate) fn send(&self) {
+        self.0.queue.fetch_add(1, Ordering::Relaxed);
         if let Some(waker) = self.0.waker.take() {
             waker.wake()
         }
-        missed
     }
 
     pub(crate) fn id(&self) -> Id {
@@ -47,16 +41,12 @@ impl Sender {
 pub(crate) struct Receiver(Arc<Inner>);
 
 impl Receiver {
-    pub(crate) fn is_filled(&self) -> bool {
-        self.0.filled.load(Ordering::Relaxed)
+    pub(crate) fn peek(&self) -> bool {
+        self.0.queue.load(Ordering::Relaxed) > 0
     }
 
     pub(crate) fn id(&self) -> Id {
         self.0.id
-    }
-
-    pub(crate) fn reset(&self) {
-        self.0.filled.store(false, Ordering::Relaxed);
     }
 
     pub(crate) fn sender(&self) -> Sender {
@@ -68,16 +58,27 @@ impl Future for Receiver {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.0.filled.load(Ordering::Relaxed) {
-            Poll::Ready(())
-        } else {
-            match unsafe { &*self.0.waker.as_ptr() } {
-                Some(waker) if waker.will_wake(cx.waker()) => (),
-                _ => {
-                    self.0.waker.store(Some(cx.waker().clone()));
+        loop {
+            let cur = self.0.queue.load(Ordering::Relaxed);
+            if cur > 0 {
+                match self.0.queue.compare_exchange(
+                    cur,
+                    cur - 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break Poll::Ready(()),
+                    Err(_) => (),
                 }
+            } else {
+                match unsafe { &*self.0.waker.as_ptr() } {
+                    Some(waker) if waker.will_wake(cx.waker()) => (),
+                    _ => {
+                        self.0.waker.store(Some(cx.waker().clone()));
+                    }
+                }
+                break Poll::Pending
             }
-            Poll::Pending
         }
     }
 }
@@ -85,7 +86,7 @@ impl Future for Receiver {
 pub(crate) fn channel() -> (Sender, Receiver) {
     let inner = Arc::new(Inner {
         id: Id::default(),
-        filled: AtomicBool::new(false),
+        queue: AtomicUsize::new(0),
         waker: AtomicCell::new(None),
     });
     (Sender(inner.clone()), Receiver(inner))

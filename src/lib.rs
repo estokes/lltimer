@@ -1,4 +1,3 @@
-mod atomic_waker;
 mod ctx;
 mod unit_channel;
 
@@ -39,7 +38,6 @@ impl Drop for Interval {
 impl Interval {
     pub async fn tick(&mut self) -> Instant {
         (&mut self.0).await;
-        self.0.reset();
         Instant::now()
     }
 }
@@ -57,7 +55,7 @@ impl Sleep {
     }
 
     pub fn is_elapsed(&self) -> bool {
-        self.signal.is_filled()
+        self.signal.peek()
     }
 
     pub fn reset(&mut self, deadline: Instant) {
