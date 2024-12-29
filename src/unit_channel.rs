@@ -1,9 +1,10 @@
 use crate::atomic_waker::AtomicWaker;
+use crossbeam::atomic::AtomicCell;
 use std::{
     future::Future,
     pin::Pin,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 use triomphe::Arc;
 
@@ -17,11 +18,10 @@ impl Default for Id {
     }
 }
 
-#[derive(Debug)]
 struct Inner {
     id: Id,
     filled: AtomicBool,
-    waker: AtomicWaker,
+    waker: AtomicCell<Option<Waker>>,
 }
 
 pub(crate) struct Sender(Arc<Inner>);
@@ -68,10 +68,15 @@ impl Future for Receiver {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.0.waker.register(cx.waker());
         if self.0.filled.load(Ordering::Relaxed) {
             Poll::Ready(())
         } else {
+            match unsafe { &*self.0.waker.as_ptr() } {
+                Some(waker) if waker.will_wake(cx.waker()) => (),
+                _ => {
+                    self.0.waker.store(Some(cx.waker().clone()));
+                }
+            }
             Poll::Pending
         }
     }
@@ -81,7 +86,7 @@ pub(crate) fn channel() -> (Sender, Receiver) {
     let inner = Arc::new(Inner {
         id: Id::default(),
         filled: AtomicBool::new(false),
-        waker: AtomicWaker::new(),
+        waker: AtomicCell::new(None),
     });
     (Sender(inner.clone()), Receiver(inner))
 }
